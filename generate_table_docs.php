@@ -17,84 +17,105 @@
  */
 
 // メモリ制限を増加
-ini_set('memory_limit', '512M');
+ini_set( 'memory_limit', '512M' );
 
 // 引数チェック
 if ($argc < 2) {
-    die("使用方法: php generate_table_docs.php <XMLファイルパス> [--markdown] [--exclude=table1,table2] [--include=table1,table2]\n");
+    die( "使用方法: php generate_table_docs.php <XMLファイルパス> [--output=path] [--markdown] [--exclude=table1,table2] [--include=table1,table2]\n" );
 }
 
 $xmlFile = $argv[1];
-$isMarkdown = in_array('--markdown', $argv);
+$isMarkdown = in_array( '--markdown', $argv );
+$customOutputDir = null;
 
-// 除外・指定テーブルの設定
+// 除外・指定テーブル・出力パスの設定
 $excludeTables = [];
 $includeTables = [];
 foreach ($argv as $arg) {
     if (str_starts_with( $arg, '--exclude=' )) {
-        $excludeTables = explode(',', substr($arg, 10));
+        $excludeTables = explode( ',', substr( $arg, 10 ) );
     }
     if (str_starts_with( $arg, '--include=' )) {
-        $includeTables = explode(',', substr($arg, 10));
+        $includeTables = explode( ',', substr( $arg, 10 ) );
+    }
+    if (str_starts_with( $arg, '--output=' )) {
+        $customOutputDir = substr( $arg, 9 );
     }
 }
-if (!file_exists($xmlFile)) {
-    die("XMLファイルが見つかりません: $xmlFile\n");
+if (!file_exists( $xmlFile )) {
+    die( "XMLファイルが見つかりません: $xmlFile\n" );
 }
 
-// 出力ディレクトリを作成（XMLファイル名から拡張子を除いた名前）
-$xmlBasename = pathinfo($xmlFile, PATHINFO_FILENAME);
-$outputDir = __DIR__ . '/' . $xmlBasename;
+// 出力ディレクトリを作成
+if ($customOutputDir) {
+    $outputDir = $customOutputDir;
+} else {
+    $xmlBasename = pathinfo( $xmlFile, PATHINFO_FILENAME );
+    $outputDir = __DIR__ . '/' . $xmlBasename;
+}
 if (!is_dir( $outputDir ) && !mkdir( $outputDir, 0755, true ) && !is_dir( $outputDir )) {
-    throw new \RuntimeException( sprintf( 'Directory "%s" was not created', $outputDir ) );
+    throw new RuntimeException( sprintf( 'Directory "%s" was not created', $outputDir ) );
 }
 
 // XMLを読み込み（XMLReaderを使用してメモリ効率を改善）
 $tables = [];
 $reader = new XMLReader();
-$reader->open($xmlFile);
+if (!$reader->open( $xmlFile )) {
+    die( "XMLファイルの読み込みに失敗しました: $xmlFile\n" );
+}
 
 while ($reader->read()) {
     // phpMyAdmin XML形式
     if ($reader->nodeType === XMLReader::ELEMENT && $reader->localName === 'table') {
         $tableXml = $reader->readOuterXML();
-        $tableXml = str_replace('pma:', '', $tableXml);
-        $tableElement = simplexml_load_string($tableXml);
-        if ($tableElement && isset($tableElement['name'])) {
+        $tableXml = str_replace( 'pma:', '', $tableXml );
+        $tableElement = simplexml_load_string( $tableXml );
+        if ($tableElement && isset( $tableElement['name'] )) {
             $tableName = (string)$tableElement['name'];
             $createStatement = (string)$tableElement;
-            
-            $columns = parseCreateStatement($createStatement);
-            if (!empty($columns)) {
-                if (!empty($includeTables) && !in_array( $tableName, $includeTables, true )) {continue;}
-                if (!empty($excludeTables) && in_array( $tableName, $excludeTables, true )) {continue;}
+
+            $columns = parseCreateStatement( $createStatement );
+            if (!empty( $columns )) {
+                if (!empty( $includeTables ) && !in_array( $tableName, $includeTables, true )) {
+                    continue;
+                }
+                if (!empty( $excludeTables ) && in_array( $tableName, $excludeTables, true )) {
+                    continue;
+                }
                 $tables[$tableName] = [
                     'name' => $tableName,
                     'columns' => $columns,
-                    'comment' => extractTableComment($createStatement)
+                    'indexes' => extractIndexes( $createStatement ),
+                    'partitions' => extractPartitions( $createStatement ),
+                    'comment' => extractTableComment( $createStatement )
                 ];
             }
         }
-        unset($tableXml, $tableElement);
-    }
-    // mysqldump XML形式
+        unset( $tableXml, $tableElement );
+    } // mysqldump XML形式
     elseif ($reader->nodeType === XMLReader::ELEMENT && $reader->localName === 'table_structure') {
         $tableXml = $reader->readOuterXML();
-        $tableElement = simplexml_load_string($tableXml);
-        if ($tableElement && isset($tableElement['name'])) {
+        $tableElement = simplexml_load_string( $tableXml );
+        if ($tableElement && isset( $tableElement['name'] )) {
             $tableName = (string)$tableElement['name'];
-            $columns = parseMysqldumpStructure($tableElement);
-            if (!empty($columns)) {
-                if (!empty($includeTables) && !in_array( $tableName, $includeTables, true )) {continue;}
-                if (!empty($excludeTables) && in_array( $tableName, $excludeTables, true )) {continue;}
+            $columns = parseMysqldumpStructure( $tableElement );
+            if (!empty( $columns )) {
+                if (!empty( $includeTables ) && !in_array( $tableName, $includeTables, true )) {
+                    continue;
+                }
+                if (!empty( $excludeTables ) && in_array( $tableName, $excludeTables, true )) {
+                    continue;
+                }
                 $tables[$tableName] = [
                     'name' => $tableName,
                     'columns' => $columns,
+                    'indexes' => parseMysqldumpIndexes( $tableElement ),
+                    'partitions' => parseMysqldumpPartitions( $tableElement ),
                     'comment' => (string)($tableElement['Comment'] ?? '')
                 ];
             }
         }
-        unset($tableXml, $tableElement);
+        unset( $tableXml, $tableElement );
     }
 }
 
@@ -103,25 +124,25 @@ $reader->close();
 // 各テーブルのファイルを生成
 foreach ($tables as $tableName => $tableInfo) {
     if ($isMarkdown) {
-        generateTableMarkdown($tableInfo, $outputDir);
+        generateTableMarkdown( $tableInfo, $outputDir );
     } else {
-        generateTableHtml($tableInfo, $outputDir);
+        generateTableHtml( $tableInfo, $outputDir );
     }
 }
 
 // インデックスファイルを生成（指定テーブルのみの場合は不要）
-$generateIndex = empty($includeTables);
+$generateIndex = empty( $includeTables );
 if ($generateIndex) {
     if ($isMarkdown) {
-        generateIndexMarkdown($tables, $outputDir);
+        generateIndexMarkdown( $tables, $outputDir );
     } else {
-        generateIndexHtml($tables, $outputDir);
+        generateIndexHtml( $tables, $outputDir );
     }
 }
 
 echo "テーブル定義書の生成が完了しました。\n";
 echo "出力フォルダ: $outputDir\n";
-echo "生成されたファイル数: " . (count($tables) + ($generateIndex ? 1 : 0)) . "\n";
+echo "生成されたファイル数: " . (count( $tables ) + ($generateIndex ? 1 : 0)) . "\n";
 
 /**
  * CREATE文からカラム情報を抽出
@@ -129,41 +150,41 @@ echo "生成されたファイル数: " . (count($tables) + ($generateIndex ? 1 
 function parseCreateStatement($createStatement): array
 {
     $columns = [];
-    
+
     // CREATE TABLE文を解析
-    if (preg_match('/CREATE TABLE.*?\((.*)\)\s*ENGINE/s', $createStatement, $matches)) {
+    if (preg_match( '/CREATE TABLE.*?\((.*)\)\s*ENGINE/s', $createStatement, $matches )) {
         $columnDefs = $matches[1];
-        
+
         // 各行を分割
-        $lines = explode("\n", $columnDefs);
-        
+        $lines = explode( "\n", $columnDefs );
+
         foreach ($lines as $line) {
-            $line = trim($line);
-            if (empty($line) || str_starts_with( $line, 'PRIMARY KEY' ) || str_starts_with( $line, 'UNIQUE KEY' ) || str_starts_with( $line, 'KEY' )) {
+            $line = trim( $line );
+            if (empty( $line ) || str_starts_with( $line, 'PRIMARY KEY' ) || str_starts_with( $line, 'UNIQUE KEY' ) || str_starts_with( $line, 'KEY' )) {
                 continue;
             }
-            
+
             // カラム定義を解析
-            if (preg_match('/^`([^`]+)`\s+([^,\s]+(?:\([^)]+\))?)\s*(.*?)(?:,\s*)?$/', $line, $colMatches)) {
-                [,$columnName, $dataType, $attributes] = $colMatches;
+            if (preg_match( '/^`([^`]+)`\s+([^,\s]+(?:\([^)]+\))?)\s*(.*?)(?:,\s*)?$/', $line, $colMatches )) {
+                [, $columnName, $dataType, $attributes] = $colMatches;
 
                 // コメントを抽出
                 $comment = '';
-                if (preg_match('/COMMENT\s+[\'"]([^\'"]*)[\'"]/', $attributes, $commentMatches)) {
-                    $comment = html_entity_decode($commentMatches[1], ENT_QUOTES, 'UTF-8');
+                if (preg_match( '/COMMENT\s+[\'"]([^\'"]*)[\'"]/', $attributes, $commentMatches )) {
+                    $comment = html_entity_decode( $commentMatches[1], ENT_QUOTES, 'UTF-8' );
                 }
-                
+
                 // NULL許可を判定
                 $nullable = !str_contains( $attributes, 'NOT NULL' );
-                
+
                 // デフォルト値を抽出
                 $defaultValue = '';
-                if (preg_match('/DEFAULT\s+[\'"]([^\'"]*)[\'"]/', $attributes, $defaultMatches)) {
+                if (preg_match( '/DEFAULT\s+[\'"]([^\'"]*)[\'"]/', $attributes, $defaultMatches )) {
                     $defaultValue = $defaultMatches[1];
-                } elseif (preg_match('/DEFAULT\s+([^\s,]+)/', $attributes, $defaultMatches)) {
+                } elseif (preg_match( '/DEFAULT\s+([^\s,]+)/', $attributes, $defaultMatches )) {
                     $defaultValue = $defaultMatches[1];
                 }
-                
+
                 // AUTO_INCREMENTを判定
                 $autoIncrement = str_contains( $attributes, "AUTO_INCREMENT" );
                 $columns[] = [
@@ -177,8 +198,99 @@ function parseCreateStatement($createStatement): array
             }
         }
     }
-    
+
     return $columns;
+}
+
+/**
+ * CREATE文からINDEX情報を抽出
+ */
+function extractIndexes($createStatement): array
+{
+    $indexes = [];
+
+    if (preg_match( '/CREATE TABLE.*?\((.*)\)\s*ENGINE/s', $createStatement, $matches )) {
+        $columnDefs = $matches[1];
+        $lines = explode( "\n", $columnDefs );
+
+        foreach ($lines as $line) {
+            $line = trim( $line );
+
+            // PRIMARY KEY
+            if (preg_match( '/PRIMARY KEY\s*\(([^)]+)\)/', $line, $matches )) {
+                $columns = array_map( 'trim', explode( ',', str_replace( '`', '', $matches[1] ) ) );
+                $indexes[] = [
+                    'name' => 'PRIMARY',
+                    'type' => 'PRIMARY KEY',
+                    'columns' => $columns,
+                    'unique' => true
+                ];
+            } // UNIQUE KEY
+            elseif (preg_match( '/UNIQUE KEY\s+`?([^`\s]+)`?\s*\(([^)]+)\)/', $line, $matches )) {
+                $indexName = $matches[1];
+                $columns = array_map( 'trim', explode( ',', str_replace( '`', '', $matches[2] ) ) );
+                $indexes[] = [
+                    'name' => $indexName,
+                    'type' => 'UNIQUE',
+                    'columns' => $columns,
+                    'unique' => true
+                ];
+            } // KEY (通常のインデックス)
+            elseif (preg_match( '/KEY\s+`?([^`\s]+)`?\s*\(([^)]+)\)/', $line, $matches )) {
+                $indexName = $matches[1];
+                $columns = array_map( 'trim', explode( ',', str_replace( '`', '', $matches[2] ) ) );
+                $indexes[] = [
+                    'name' => $indexName,
+                    'type' => 'INDEX',
+                    'columns' => $columns,
+                    'unique' => false
+                ];
+            }
+        }
+    }
+
+    return $indexes;
+}
+
+/**
+ * CREATE文からパーティション情報を抽出
+ */
+function extractPartitions($createStatement): array
+{
+    $partitions = [];
+
+    // PARTITION BY句を検索
+    if (preg_match( '/PARTITION BY\s+(\w+)\s*\(([^)]+)\)\s*\((.*)\)\s*$/s', $createStatement, $matches )) {
+        [, $partitionType, $partitionExpression, $partitionDefs] = $matches;
+//        $partitionType = $matches[1];
+//        $partitionExpression = $matches[2];
+//        $partitionDefs = $matches[3];
+
+        // 各パーティション定義を解析
+        if (preg_match_all( '/PARTITION\s+(\w+)\s+VALUES\s+LESS\s+THAN\s*\(([^)]+)\)/', $partitionDefs, $partMatches, PREG_SET_ORDER )) {
+            foreach ($partMatches as $partMatch) {
+                $partitions[] = [
+                    'name' => $partMatch[1],
+                    'type' => $partitionType,
+                    'expression' => $partitionExpression,
+                    'value' => trim( $partMatch[2] )
+                ];
+            }
+        } // HASH/KEY パーティション
+        elseif (preg_match( '/PARTITIONS\s+(\d+)/', $partitionDefs, $partCountMatch )) {
+            $partitionCount = (int)$partCountMatch[1];
+            for ($i = 0; $i < $partitionCount; $i++) {
+                $partitions[] = [
+                    'name' => "p$i",
+                    'type' => $partitionType,
+                    'expression' => $partitionExpression,
+                    'value' => "パーティション $i"
+                ];
+            }
+        }
+    }
+
+    return $partitions;
 }
 
 /**
@@ -186,8 +298,8 @@ function parseCreateStatement($createStatement): array
  */
 function extractTableComment($createStatement): string
 {
-    if (preg_match('/COMMENT\s*=\s*[\'"]([^\'"]*)[\'"]/', $createStatement, $matches)) {
-        return html_entity_decode($matches[1], ENT_QUOTES, 'UTF-8');
+    if (preg_match( '/COMMENT\s*=\s*[\'"]([^\'"]*)[\'"]/', $createStatement, $matches )) {
+        return html_entity_decode( $matches[1], ENT_QUOTES, 'UTF-8' );
     }
     return '';
 }
@@ -197,9 +309,11 @@ function extractTableComment($createStatement): string
  */
 function generateTableHtml($tableInfo, $outputDir): void
 {
-    $tableName      = $tableInfo['name'];
-    $columns        = $tableInfo['columns'];
-    $tableComment   = $tableInfo['comment'];
+    $tableName = $tableInfo['name'];
+    $columns = $tableInfo['columns'];
+    $indexes = $tableInfo['indexes'] ?? [];
+    $partitions = $tableInfo['partitions'] ?? [];
+    $tableComment = $tableInfo['comment'];
     $html = <<<HTML
 <!DOCTYPE html>
 <html lang="ja">
@@ -309,20 +423,20 @@ function generateTableHtml($tableInfo, $outputDir): void
             }
         </script>
         
-        <h1>テーブル定義書: {$tableName}</h1>
+        <h1>テーブル定義書: $tableName</h1>
         
         <div class="table-info">
             <h2>テーブル情報</h2>
-            <p><strong>テーブル名:</strong> {$tableName}</p>
+            <p><strong>テーブル名:</strong> $tableName</p>
 HTML;
 
-    if (!empty($tableComment)) {
-        $html .= "<p><strong>説明:</strong> {$tableComment}</p>";
+    if (!empty( $tableComment )) {
+        $html .= "<p><strong>説明:</strong> $tableComment</p>";
     }
-    
-    $columnCount = count($columns);
+
+    $columnCount = count( $columns );
     $html .= <<<HTML
-            <p><strong>カラム数:</strong> {$columnCount}</p>
+            <p><strong>カラム数:</strong> $columnCount</p>
         </div>
         
         <table>
@@ -341,32 +455,113 @@ HTML;
 
     foreach ($columns as $column) {
         $nullableText = $column['nullable'] ? '<span class="nullable-yes">YES</span>' : '<span class="nullable-no">NO</span>';
-        $defaultValue = htmlspecialchars($column['default']);
+        $defaultValue = htmlspecialchars( $column['default'] );
         $autoIncrementText = $column['auto_increment'] ? '<span class="auto-increment">AUTO_INCREMENT</span>' : '';
-        $comment = htmlspecialchars($column['comment']);
-        
+        $comment = htmlspecialchars( $column['comment'] );
+
         $html .= <<<HTML
                 <tr>
                     <td><strong>{$column['name']}</strong></td>
                     <td><span class="type">{$column['type']}</span></td>
-                    <td>{$nullableText}</td>
-                    <td>{$defaultValue}</td>
-                    <td>{$autoIncrementText}</td>
-                    <td class="comment">{$comment}</td>
+                    <td>$nullableText</td>
+                    <td>$defaultValue</td>
+                    <td>$autoIncrementText</td>
+                    <td class="comment">$comment</td>
                 </tr>
 HTML;
     }
-    
+
     $html .= <<<HTML
             </tbody>
         </table>
+HTML;
+
+    // インデックス情報を追加
+    if (!empty( $indexes )) {
+        $html .= <<<HTML
+        
+        <h2 style="margin-top: 40px; color: #333; border-bottom: 2px solid #28a745; padding-bottom: 10px;">インデックス情報</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>インデックス名</th>
+                    <th>タイプ</th>
+                    <th>対象カラム</th>
+                    <th>ユニーク</th>
+                </tr>
+            </thead>
+            <tbody>
+HTML;
+
+        foreach ($indexes as $index) {
+            $indexName = htmlspecialchars( $index['name'] );
+            $indexType = htmlspecialchars( $index['type'] );
+            $indexColumns = htmlspecialchars( implode( ', ', $index['columns'] ) );
+            $uniqueText = $index['unique'] ? '<span class="nullable-no">YES</span>' : '<span class="nullable-yes">NO</span>';
+
+            $html .= <<<HTML
+                <tr>
+                    <td><strong>$indexName</strong></td>
+                    <td><span class="type">$indexType</span></td>
+                    <td>$indexColumns</td>
+                    <td>$uniqueText</td>
+                </tr>
+HTML;
+        }
+
+        $html .= <<<HTML
+            </tbody>
+        </table>
+HTML;
+    }
+
+    // パーティション情報を追加
+    if (!empty( $partitions )) {
+        $html .= <<<HTML
+        
+        <h2 style="margin-top: 40px; color: #333; border-bottom: 2px solid #ffc107; padding-bottom: 10px;">パーティション情報</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>パーティション名</th>
+                    <th>タイプ</th>
+                    <th>式</th>
+                    <th>値</th>
+                </tr>
+            </thead>
+            <tbody>
+HTML;
+
+        foreach ($partitions as $partition) {
+            $partitionName = htmlspecialchars( $partition['name'] );
+            $partitionType = htmlspecialchars( $partition['type'] );
+            $partitionExpression = htmlspecialchars( $partition['expression'] );
+            $partitionValue = htmlspecialchars( $partition['value'] );
+
+            $html .= <<<HTML
+                <tr>
+                    <td><strong>$partitionName</strong></td>
+                    <td><span class="type">$partitionType</span></td>
+                    <td>$partitionExpression</td>
+                    <td>$partitionValue</td>
+                </tr>
+HTML;
+        }
+
+        $html .= <<<HTML
+            </tbody>
+        </table>
+HTML;
+    }
+
+    $html .= <<<HTML
     </div>
 </body>
 </html>
 HTML;
 
-    $filename = $outputDir . "/{$tableName}.html";
-    file_put_contents($filename, $html);
+    $filename = $outputDir . "/$tableName.html";
+    file_put_contents( $filename, $html );
 }
 
 /**
@@ -374,8 +569,8 @@ HTML;
  */
 function generateIndexHtml($tables, $outputDir): void
 {
-    $tableCount = count($tables);
-    $xmlBasename = basename(dirname($outputDir)) === 'database' ? basename($outputDir) : basename($outputDir);
+    $tableCount = count( $tables );
+    $xmlBasename = basename( $outputDir );
     $html = <<<HTML
 <!DOCTYPE html>
 <html lang="ja">
@@ -477,9 +672,9 @@ function generateIndexHtml($tables, $outputDir): void
 HTML;
 
     foreach ($tables as $tableName => $tableInfo) {
-        $comment = htmlspecialchars($tableInfo['comment']);
-        $columnCount = count($tableInfo['columns']);
-        
+        $comment = htmlspecialchars( $tableInfo['comment'] );
+        $columnCount = count( $tableInfo['columns'] );
+
         $html .= <<<HTML
             <a href="$tableName.html" class="table-link">
                 <div class="table-card">
@@ -490,8 +685,8 @@ HTML;
             </a>
 HTML;
     }
-    
-    $currentTime = date('Y-m-d H:i:s');
+
+    $currentTime = date( 'Y-m-d H:i:s' );
     $html .= <<<HTML
         </div>
         
@@ -504,7 +699,7 @@ HTML;
 HTML;
 
     $filename = $outputDir . "/index.html";
-    file_put_contents($filename, $html);
+    file_put_contents( $filename, $html );
 }
 
 /**
@@ -512,29 +707,31 @@ HTML;
  */
 function generateTableMarkdown($tableInfo, $outputDir): void
 {
-    $tableName      = $tableInfo['name'];
-    $columns        = $tableInfo['columns'];
-    $tableComment   = $tableInfo['comment'];
-    
+    $tableName = $tableInfo['name'];
+    $columns = $tableInfo['columns'];
+    $indexes = $tableInfo['indexes'] ?? [];
+    $partitions = $tableInfo['partitions'] ?? [];
+    $tableComment = $tableInfo['comment'];
+
     $markdown = "# テーブル定義書: $tableName\n\n";
-    
+
     // インデックスファイルが存在する場合のみリンクを表示
-    if (file_exists($outputDir . '/index.md')) {
+    if (file_exists( $outputDir . '/index.md' )) {
         $markdown .= "[← テーブル一覧に戻る](index.md)\n\n";
     }
     $markdown .= "## テーブル情報\n\n";
     $markdown .= "- **テーブル名**: $tableName\n";
 
-    if (!empty($tableComment)) {
+    if (!empty( $tableComment )) {
         $markdown .= "- **説明**: $tableComment\n";
     }
-    
-    $columnCount = count($columns);
+
+    $columnCount = count( $columns );
     $markdown .= "- **カラム数**: $columnCount\n\n";
     $markdown .= "## カラム一覧\n\n";
     $markdown .= "| カラム名 | データ型 | NULL許可 | デフォルト値 | その他 | 説明 |\n";
     $markdown .= "|----------|----------|----------|------------|--------|------|\n";
-    
+
     foreach ($columns as $column) {
         $nullableText = $column['nullable'] ? 'YES' : 'NO';
         $defaultValue = $column['default'] ?: '-';
@@ -542,9 +739,39 @@ function generateTableMarkdown($tableInfo, $outputDir): void
         $comment = $column['comment'] ?: '-';
         $markdown .= "| **{$column['name']}** | `{$column['type']}` | $nullableText | $defaultValue | $autoIncrementText | $comment |\n";
     }
-    
+
+    // インデックス情報を追加
+    if (!empty( $indexes )) {
+        $markdown .= "\n## インデックス情報\n\n";
+        $markdown .= "| インデックス名 | タイプ | 対象カラム | ユニーク |\n";
+        $markdown .= "|------------|------|----------|--------|\n";
+
+        foreach ($indexes as $index) {
+            $indexName = $index['name'];
+            $indexType = $index['type'];
+            $indexColumns = implode( ', ', $index['columns'] );
+            $uniqueText = $index['unique'] ? 'YES' : 'NO';
+            $markdown .= "| **$indexName** | `$indexType` | $indexColumns | $uniqueText |\n";
+        }
+    }
+
+    // パーティション情報を追加
+    if (!empty( $partitions )) {
+        $markdown .= "\n## パーティション情報\n\n";
+        $markdown .= "| パーティション名 | タイプ | 式 | 値 |\n";
+        $markdown .= "|----------------|------|----|----|\n";
+
+        foreach ($partitions as $partition) {
+            $partitionName = $partition['name'];
+            $partitionType = $partition['type'];
+            $partitionExpression = $partition['expression'];
+            $partitionValue = $partition['value'];
+            $markdown .= "| **$partitionName** | `$partitionType` | $partitionExpression | $partitionValue |\n";
+        }
+    }
+
     $filename = $outputDir . "/$tableName.md";
-    file_put_contents($filename, $markdown);
+    file_put_contents( $filename, $markdown );
 }
 
 /**
@@ -552,28 +779,91 @@ function generateTableMarkdown($tableInfo, $outputDir): void
  */
 function generateIndexMarkdown($tables, $outputDir): void
 {
-    $tableCount = count($tables);
-    $xmlBasename = basename($outputDir);
+    $tableCount = count( $tables );
+    $xmlBasename = basename( $outputDir );
     $markdown = "# データベーステーブル定義書\n\n";
     $markdown .= "## 概要\n\n";
     $markdown .= "- **データベース**: $xmlBasename\n";
     $markdown .= "- **テーブル数**: $tableCount\n\n";
     $markdown .= "## テーブル一覧\n\n";
-    
+
     foreach ($tables as $tableName => $tableInfo) {
         $comment = $tableInfo['comment'] ?: '説明なし';
-        $columnCount = count($tableInfo['columns']);
+        $columnCount = count( $tableInfo['columns'] );
         $markdown .= "### [$tableName]($tableName.md)\n\n";
         $markdown .= "- **説明**: $comment\n";
         $markdown .= "- **カラム数**: $columnCount\n\n";
     }
-    
-    $currentTime = date('Y-m-d H:i:s');
+
+    $currentTime = date( 'Y-m-d H:i:s' );
     $markdown .= "---\n\n";
     $markdown .= "*生成日時: $currentTime*\n";
-    
+
     $filename = $outputDir . "/index.md";
-    file_put_contents($filename, $markdown);
+    file_put_contents( $filename, $markdown );
+}
+
+/**
+ * mysqldump XML形式のインデックス情報を解析
+ */
+function parseMysqldumpIndexes($tableElement): array
+{
+    $indexes = [];
+
+    if (!isset( $tableElement->key )) {
+        return $indexes;
+    }
+
+    foreach ($tableElement->key as $key) {
+        $keyName = (string)$key['Key_name'];
+        $nonUnique = (string)$key['Non_unique'] === '1';
+        $columnName = (string)$key['Column_name'];
+
+        // 既存のインデックスに追加するか新規作成
+        $found = false;
+        foreach ($indexes as &$index) {
+            if ($index['name'] === $keyName) {
+                $index['columns'][] = $columnName;
+                $found = true;
+                break;
+            }
+        }
+
+        if (!$found) {
+            $type = 'INDEX';
+            if ($keyName === 'PRIMARY') {
+                $type = 'PRIMARY KEY';
+            } elseif (!$nonUnique) {
+                $type = 'UNIQUE';
+            }
+
+            $indexes[] = [
+                'name' => $keyName,
+                'type' => $type,
+                'columns' => [$columnName],
+                'unique' => !$nonUnique
+            ];
+        }
+    }
+
+    return $indexes;
+}
+
+/**
+ * mysqldump XML形式のパーティション情報を解析
+ */
+function parseMysqldumpPartitions($tableElement): array
+{
+    $partitions = [];
+
+    // mysqldumpのXMLにはパーティション情報が含まれていない場合が多い
+    // SHOW CREATE TABLEの結果が含まれている場合のみ解析
+    if (isset( $tableElement->options->comment )) {
+        $createStatement = (string)$tableElement->options->comment;
+        return extractPartitions( $createStatement );
+    }
+
+    return $partitions;
 }
 
 /**
@@ -582,11 +872,11 @@ function generateIndexMarkdown($tables, $outputDir): void
 function parseMysqldumpStructure($tableElement): array
 {
     $columns = [];
-    
-    if (!isset($tableElement->field)) {
+
+    if (!isset( $tableElement->field )) {
         return $columns;
     }
-    
+
     foreach ($tableElement->field as $field) {
         $fieldName = (string)$field['Field'];
         $fieldType = (string)$field['Type'];
@@ -594,9 +884,9 @@ function parseMysqldumpStructure($tableElement): array
         $defaultValue = (string)($field['Default'] ?? '');
         $extra = (string)($field['Extra'] ?? '');
         $comment = (string)($field['Comment'] ?? '');
-        
-        $autoIncrement = str_contains($extra, 'auto_increment');
-        
+
+        $autoIncrement = str_contains( $extra, 'auto_increment' );
+
         $columns[] = [
             'name' => $fieldName,
             'type' => $fieldType,
@@ -606,6 +896,6 @@ function parseMysqldumpStructure($tableElement): array
             'comment' => $comment
         ];
     }
-    
+
     return $columns;
 }
