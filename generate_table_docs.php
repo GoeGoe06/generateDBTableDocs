@@ -95,7 +95,9 @@ try {
                         'columns' => $columns,
                         'indexes' => extractIndexes($createStatement),
                         'partitions' => extractPartitions($createStatement),
-                        'comment' => extractTableComment($createStatement)
+                        'comment' => extractTableComment($createStatement),
+                        'engine' => extractEngine($createStatement),
+                        'charset' => extractCharset($createStatement)
                     ];
                 }
             }
@@ -118,7 +120,9 @@ try {
                         'columns' => $columns,
                         'indexes' => parseMysqldumpIndexes($tableElement),
                         'partitions' => parseMysqldumpPartitions($tableElement),
-                        'comment' => (string)($tableElement['Comment'] ?? '')
+                        'comment' => (string)($tableElement['Comment'] ?? ''),
+                        'engine' => (string)($tableElement['Engine'] ?? ''),
+                        'charset' => (string)($tableElement['Collation'] ?? '')
                     ];
                 }
             }
@@ -331,6 +335,34 @@ function extractTableComment(string $createStatement): string
 }
 
 /**
+ * CREATE TABLE文からENGINEを抽出する
+ *
+ * @param string $createStatement CREATE TABLE文の文字列
+ * @return string ENGINE名
+ */
+function extractEngine(string $createStatement): string
+{
+    if (preg_match('/ENGINE\s*=\s*(\w+)/', $createStatement, $matches)) {
+        return $matches[1];
+    }
+    return '';
+}
+
+/**
+ * CREATE TABLE文からDEFAULT CHARSETを抽出する
+ *
+ * @param string $createStatement CREATE TABLE文の文字列
+ * @return string DEFAULT CHARSET名
+ */
+function extractCharset(string $createStatement): string
+{
+    if (preg_match('/(?:DEFAULT\s+)?CHARSET\s*=\s*(\w+)/', $createStatement, $matches)) {
+        return $matches[1];
+    }
+    return '';
+}
+
+/**
  * 個別テーブルのHTMLファイルを生成する
  *
  * @param array $tableInfo テーブル情報
@@ -368,7 +400,14 @@ function generateTableHtml(array $tableInfo, string $outputDir): void
     if (!empty($tableComment)) {
         $html .= "<p><strong>説明:</strong> $safeTableComment</p>";
     }
-    
+    if (!empty($tableInfo['engine'])) {
+        $safeEngine = htmlspecialchars($tableInfo['engine'], ENT_QUOTES, 'UTF-8');
+        $html .= "<p><strong>ENGINE:</strong> $safeEngine</p>";
+    }
+    if (!empty($tableInfo['charset'])) {
+        $safeCharset = htmlspecialchars($tableInfo['charset'], ENT_QUOTES, 'UTF-8');
+        $html .= "<p><strong>DEFAULT CHARSET:</strong> $safeCharset</p>";
+    }
     $html .= "<p><strong>カラム数:</strong> " . count($columns) . "</p>";
     $html .= "<table><thead><tr><th>カラム名</th><th>データ型</th><th>NULL許可</th><th>デフォルト値</th><th>その他</th><th>説明</th></tr></thead><tbody>";
 
@@ -510,6 +549,12 @@ function generateTableMarkdown(array $tableInfo, string $outputDir): void
     $markdown = "# テーブル定義書: $tableName\n\n## テーブル情報\n\n- **テーブル名**: $tableName\n";
     if (!empty($tableComment)) {
         $markdown .= "- **説明**: $tableComment\n";
+    }
+    if (!empty($tableInfo['engine'])) {
+        $markdown .= "- **ENGINE**: {$tableInfo['engine']}\n";
+    }
+    if (!empty($tableInfo['charset'])) {
+        $markdown .= "- **DEFAULT CHARSET**: {$tableInfo['charset']}\n";
     }
     $markdown .= "- **カラム数**: " . count($columns) . "\n\n## カラム一覧\n\n";
     $markdown .= "| カラム名 | データ型 | NULL許可 | デフォルト値 | その他 | 説明 |\n";
